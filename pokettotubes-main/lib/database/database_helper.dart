@@ -1,6 +1,7 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:crypto/crypto.dart';
+import 'package:intl/intl.dart';
 import 'dart:convert';
 
 class DatabaseHelper {
@@ -25,9 +26,13 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
+      // FIXED: Enable foreign keys
+      onConfigure: (db) async {
+        await db.execute('PRAGMA foreign_keys = ON');
+      },
     );
   }
 
@@ -51,6 +56,7 @@ class DatabaseHelper {
       CREATE TABLE budget (
         budget_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
+        name TEXT NOT NULL,
         category_id INTEGER,
         target_amount REAL,
         start_date TEXT,
@@ -64,11 +70,13 @@ class DatabaseHelper {
         transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         category_id INTEGER,
+        budget_id INTEGER,
         amount REAL NOT NULL,
         description TEXT,
         date TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES user (user_id) ON DELETE CASCADE,
-        FOREIGN KEY (category_id) REFERENCES category (category_id)
+        FOREIGN KEY (category_id) REFERENCES category (category_id),
+        FOREIGN KEY (budget_id) REFERENCES budget (budget_id) ON DELETE SET NULL
       )
     ''');
     await db.execute('''
@@ -79,6 +87,7 @@ class DatabaseHelper {
         FOREIGN KEY (user_id) REFERENCES user (user_id) ON DELETE CASCADE
       )
     ''');
+
     await db.execute('''
       CREATE TABLE folder (
         folder_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,6 +128,14 @@ class DatabaseHelper {
           FOREIGN KEY (transaction_id) REFERENCES transactions (transaction_id) ON DELETE CASCADE
         )
       ''');
+    }
+    
+    if (oldVersion < 3) {
+      // Add name column to budget table
+      await db.execute('ALTER TABLE budget ADD COLUMN name TEXT DEFAULT ""');
+      
+      // Add budget_id column to transactions table
+      await db.execute('ALTER TABLE transactions ADD COLUMN budget_id INTEGER REFERENCES budget(budget_id) ON DELETE SET NULL');
     }
   }
 
@@ -227,6 +244,62 @@ class DatabaseHelper {
     );
   }
 
+  // ADDED: User custom category operations
+  Future<int> createCategory(String name, String type) async {
+    final db = await database;
+    try {
+      return await db.insert('category', {
+        'name': name,
+        'type': type,
+      });
+    } catch (e) {
+      print('Error creating category: $e');
+      return -1;
+    }
+  }
+
+  Future<int> updateCategory(int categoryId, String name) async {
+    final db = await database;
+    try {
+      return await db.update(
+        'category',
+        {'name': name},
+        where: 'category_id = ?',
+        whereArgs: [categoryId],
+      );
+    } catch (e) {
+      print('Error updating category: $e');
+      return -1;
+    }
+  }
+
+  Future<int> deleteCategory(int categoryId) async {
+    final db = await database;
+    try {
+      // Check if category is being used in transactions
+      final result = await db.query(
+        'transactions',
+        where: 'category_id = ?',
+        whereArgs: [categoryId],
+        limit: 1,
+      );
+      
+      if (result.isNotEmpty) {
+        print('Cannot delete category: still in use');
+        return -1;
+      }
+      
+      return await db.delete(
+        'category',
+        where: 'category_id = ?',
+        whereArgs: [categoryId],
+      );
+    } catch (e) {
+      print('Error deleting category: $e');
+      return -1;
+    }
+  }
+
   // ===== TRANSACTION OPERATIONS =====
   Future<int> createTransaction({
     required int userId,
@@ -234,12 +307,14 @@ class DatabaseHelper {
     required double amount,
     required String description,
     required String date,
+    int? budgetId,
   }) async {
     final db = await database;
     try {
       final transactionId = await db.insert('transactions', {
         'user_id': userId,
         'category_id': categoryId,
+        'budget_id': budgetId,
         'amount': amount,
         'description': description,
         'date': date,
@@ -252,12 +327,41 @@ class DatabaseHelper {
     }
   }
 
+  Future<int> updateTransaction({
+    required int transactionId,
+    required int categoryId,
+    required double amount,
+    required String description,
+    required String date,
+    int? budgetId,
+  }) async {
+    final db = await database;
+    try {
+      return await db.update(
+        'transactions',
+        {
+          'category_id': categoryId,
+          'budget_id': budgetId,
+          'amount': amount,
+          'description': description,
+          'date': date,
+        },
+        where: 'transaction_id = ?',
+        whereArgs: [transactionId],
+      );
+    } catch (e) {
+      print('Error updating transaction: $e');
+      return -1;
+    }
+  }
+
   Future<List<Map<String, dynamic>>> getTransactionsByUser(int userId) async {
     final db = await database;
     return await db.rawQuery('''
-      SELECT t.*, c.name as category_name, c.type as category_type
+      SELECT t.*, c.name as category_name, c.type as category_type, b.name as budget_name
       FROM transactions t
       LEFT JOIN category c ON t.category_id = c.category_id
+      LEFT JOIN budget b ON t.budget_id = b.budget_id
       WHERE t.user_id = ?
       ORDER BY t.date DESC
     ''', [userId]);
@@ -266,89 +370,39 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> getTransactionsByMonth(int userId, String month) async {
     final db = await database;
     return await db.rawQuery('''
-      SELECT DISTINCT t.*, c.name as category_name, c.type as category_type
+      SELECT DISTINCT t.*, c.name as category_name, c.type as category_type, b.name as budget_name
       FROM transactions t
       LEFT JOIN category c ON t.category_id = c.category_id
+      LEFT JOIN budget b ON t.budget_id = b.budget_id
       WHERE t.user_id = ? AND t.date LIKE ?
       ORDER BY t.date DESC
     ''', [userId, '$month%']);
   }
 
-  Future<Map<String, dynamic>?> getTransactionById(int transactionId) async {
-    final db = await database;
-    try {
-      final result = await db.rawQuery('''
-        SELECT t.*, c.name as category_name, c.type as type
-        FROM transactions t
-        LEFT JOIN category c ON t.category_id = c.category_id
-        WHERE t.transaction_id = ?
-      ''', [transactionId]);
-      
-      if (result.isNotEmpty) {
-        return result.first;
-      }
-      return null;
-    } catch (e) {
-      print('Error getting transaction: $e');
-      return null;
-    }
-  }
-
-  Future<int> updateTransaction({
-    required int transactionId,
-    required int categoryId,
-    required double amount,
-    required String description,
-    required String date,
-  }) async {
-    final db = await database;
-    try {
-      final result = await db.update(
-        'transactions',
-        {
-          'category_id': categoryId,
-          'amount': amount,
-          'description': description,
-          'date': date,
-        },
-        where: 'transaction_id = ?',
-        whereArgs: [transactionId],
-      );
-      print('✅ Transaction updated: $result row(s) affected');
-      return result;
-    } catch (e) {
-      print('❌ Error updating transaction: $e');
-      return 0;
-    }
-  }
-
   Future<int> deleteTransaction(int transactionId) async {
     final db = await database;
-    try {
-      final result = await db.delete(
-        'transactions',
-        where: 'transaction_id = ?',
-        whereArgs: [transactionId],
-      );
-      print('✅ Transaction deleted: $result row(s) affected');
-      return result;
-    } catch (e) {
-      print('❌ Error deleting transaction: $e');
-      return 0;
-    }
+    // FIXED: With foreign keys enabled, this will automatically cascade delete from folder_transaction
+    return await db.delete(
+      'transactions',
+      where: 'transaction_id = ?',
+      whereArgs: [transactionId],
+    );
   }
 
   // ===== BUDGET OPERATIONS =====
   Future<int> createBudget({
     required int userId,
+    required String name,
     required int categoryId,
     required double targetAmount,
     required String startDate,
     required String endDate,
   }) async {
     final db = await database;
+
     return await db.insert('budget', {
       'user_id': userId,
+      'name': name,
       'category_id': categoryId,
       'target_amount': targetAmount,
       'start_date': startDate,
@@ -366,6 +420,94 @@ class DatabaseHelper {
     ''', [userId]);
   }
 
+  Future<List<Map<String, dynamic>>> getAllTargets(int userId) async {
+    final db = await database;
+    return await db.rawQuery('''
+      SELECT b.*, c.name as category_name
+      FROM budget b
+      LEFT JOIN category c ON b.category_id = c.category_id
+      WHERE b.user_id = ?
+      ORDER BY b.end_date DESC
+    ''', [userId]);
+  }
+
+  Future<List<Map<String, dynamic>>> getActiveTargets(int userId) async {
+    final db = await database;
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+    
+    return await db.rawQuery('''
+      SELECT b.*, c.name as category_name
+      FROM budget b
+      LEFT JOIN category c ON b.category_id = c.category_id
+      WHERE b.user_id = ? AND b.end_date >= ?
+      ORDER BY b.end_date ASC
+    ''', [userId, today]);
+  }
+
+  Future<Map<String, dynamic>?> getActiveTarget(int userId) async {
+    final db = await database;
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+    
+    final result = await db.rawQuery('''
+      SELECT b.*, c.name as category_name
+      FROM budget b
+      LEFT JOIN category c ON b.category_id = c.category_id
+      WHERE b.user_id = ? AND b.end_date >= ?
+      ORDER BY b.end_date ASC
+      LIMIT 1
+    ''', [userId, today]);
+    
+    if (result.isNotEmpty) {
+      return result.first;
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>> getTargetProgress(int userId, int budgetId) async {
+    final db = await database;
+    
+    final budgetResult = await db.query(
+      'budget',
+      where: 'budget_id = ?',
+      whereArgs: [budgetId],
+    );
+    
+    if (budgetResult.isEmpty) {
+      return {
+        'spent': 0.0,
+        'target': 0.0,
+        'remaining': 0.0,
+        'percentage': 0.0,
+      };
+    }
+    
+    final budget = budgetResult.first;
+    final targetAmount = (budget['target_amount'] as num).toDouble();
+    final startDate = budget['start_date'] as String;
+    final endDate = budget['end_date'] as String;
+    
+    final spentResult = await db.rawQuery('''
+      SELECT COALESCE(SUM(t.amount), 0) as total
+      FROM transactions t
+      WHERE t.user_id = ? 
+        AND t.budget_id = ?
+        AND t.date BETWEEN ? AND ?
+    ''', [userId, budgetId, startDate, endDate]);
+    
+    final spent = (spentResult.first['total'] as num).toDouble();
+    final remaining = targetAmount - spent;
+    final percentage = targetAmount > 0 ? (spent / targetAmount * 100) : 0.0;
+    
+    return {
+      'spent': spent,
+      'target': targetAmount,
+      'remaining': remaining > 0 ? remaining : 0.0,
+      'percentage': percentage > 100 ? 100.0 : percentage,
+    };
+  }
+
   Future<int> updateBudget(int budgetId, double targetAmount) async {
     final db = await database;
     return await db.update(
@@ -377,6 +519,15 @@ class DatabaseHelper {
   }
 
   Future<int> deleteBudget(int budgetId) async {
+    final db = await database;
+    return await db.delete(
+      'budget',
+      where: 'budget_id = ?',
+      whereArgs: [budgetId],
+    );
+  }
+
+  Future<int> deleteTarget(int budgetId) async {
     final db = await database;
     return await db.delete(
       'budget',
@@ -533,18 +684,22 @@ class DatabaseHelper {
     print('✅ Berhasil mengeluarkan ${transactionIds.length} transaksi dari folder ID: $folderId.');
   }
 
+  // FIXED: Enhanced deleteEmptyFolders with error handling
   Future<void> deleteEmptyFolders() async {
-    final db = await database;
-    await db.rawDelete('''
-      DELETE FROM folder
-      WHERE folder_id NOT IN (
-        SELECT DISTINCT folder_id FROM folder_transaction
-      )
-    ''');
-    print('✅ Berhasil membersihkan folder yang kosong.');
+    try {
+      final db = await database;
+      await db.rawDelete('''
+        DELETE FROM folder
+        WHERE folder_id NOT IN (
+          SELECT DISTINCT folder_id FROM folder_transaction
+        )
+      ''');
+      print('✅ Berhasil membersihkan folder yang kosong.');
+    } catch (e) {
+      print('⚠️  Error cleaning empty folders: $e');
+    }
   }
 
-  // Close database
   Future<void> close() async {
     final db = await database;
     db.close();

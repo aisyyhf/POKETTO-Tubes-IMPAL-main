@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:poketto/database/database_helper.dart';
 import 'package:poketto/folder_detail_page.dart';
 import 'package:poketto/providers/user_provider.dart';
+import 'package:poketto/manage_categories_page.dart';
 import 'package:provider/provider.dart';
 
 /// Halaman untuk menampilkan daftar semua kategori yang telah dibuat oleh pengguna.
@@ -26,17 +27,38 @@ class _AllCategoriesPageState extends State<AllCategoriesPage> {
   Future<void> _loadCategories() async {
     final userProvider = Provider.of<UserProvider>(context, listen: false);
     final userId = userProvider.userId;
-    if (userId == null) return; // Keluar jika tidak ada pengguna
+    if (userId == null) return;
 
     setState(() => _isLoading = true);
-    final db = DatabaseHelper.instance;
-    final folderList = await db.getFoldersByUser(userId);
+    
+    try {
+      final db = DatabaseHelper.instance;
+      final folderList = await db.getFoldersByUser(userId);
 
-    if (mounted) {
+      // FIXED: Check mounted before setState
+      if (!mounted) return;
+      
       setState(() {
         _folders = folderList;
         _isLoading = false;
       });
+    } catch (e) {
+      print('Error loading categories: $e');
+      
+      // FIXED: Check mounted before setState
+      if (!mounted) return;
+      
+      setState(() => _isLoading = false);
+      
+      // FIXED: Show error to user
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error loading categories: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -47,6 +69,23 @@ class _AllCategoriesPageState extends State<AllCategoriesPage> {
         title: const Text('Semua Kategori'),
         backgroundColor: const Color(0xFFED8A35),
         foregroundColor: Colors.black,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const ManageCategoriesPage(),
+                ),
+              );
+              // Reload after returning from manage categories
+              if (!mounted) return;
+              _loadCategories();
+            },
+            tooltip: 'Kelola Kategori Transaksi',
+          ),
+        ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
@@ -77,8 +116,9 @@ class _AllCategoriesPageState extends State<AllCategoriesPage> {
             title: Text(folder['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
             subtitle: Text('${folder['transaction_count']} items'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              Navigator.push(
+            onTap: () async {
+              // FIXED: Await navigation and check mounted
+              await Navigator.push(
                 context,
                 MaterialPageRoute(
                   builder: (context) => FolderDetailPage(
@@ -86,10 +126,13 @@ class _AllCategoriesPageState extends State<AllCategoriesPage> {
                     folderName: folder['name'] as String,
                   ),
                 ),
-              ).then((_) {
-                // Muat ulang data saat kembali dari halaman detail
-                _loadCategories();
-              });
+              );
+              
+              // FIXED: Check mounted before reload
+              if (!mounted) return;
+              
+              // Muat ulang data saat kembali dari halaman detail
+              _loadCategories();
             },
           ),
         );
@@ -99,18 +142,32 @@ class _AllCategoriesPageState extends State<AllCategoriesPage> {
 
   /// Membangun widget yang akan ditampilkan saat tidak ada kategori yang dibuat.
   Widget _buildEmptyState() {
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.create_new_folder_outlined, size: 64, color: Colors.black26),
-          SizedBox(height: 16),
-          Text(
-            'Belum ada kategori yang dibuat',
-            style: TextStyle(fontSize: 16, color: Colors.black45),
+    return ListView(
+      children: const [
+        SizedBox(height: 100),
+        Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.create_new_folder_outlined, size: 64, color: Colors.black26),
+              SizedBox(height: 16),
+              Text(
+                'Belum ada kategori yang dibuat',
+                style: TextStyle(fontSize: 16, color: Colors.black45),
+              ),
+              SizedBox(height: 8),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 40),
+                child: Text(
+                  'Buat kategori untuk mengelompokkan transaksi Anda',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, color: Colors.black38),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

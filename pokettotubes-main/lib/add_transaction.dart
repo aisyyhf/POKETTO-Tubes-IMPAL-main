@@ -4,9 +4,10 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:poketto/database/database_helper.dart';
 import 'package:poketto/providers/user_provider.dart';
+import 'package:poketto/manage_categories_page.dart';
 
 class AddTransactionPage extends StatefulWidget {
-  final Map<String, dynamic>? transaction; // null = mode tambah, ada data = mode edit
+  final Map<String, dynamic>? transaction;
   
   const AddTransactionPage({
     super.key,
@@ -23,19 +24,21 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   
   bool isIncome = true;
   int? selectedCategoryId;
+  int? selectedBudgetId;
   DateTime selectedDate = DateTime.now();
   bool isLoading = false;
 
   List<Map<String, dynamic>> incomeCategories = [];
   List<Map<String, dynamic>> expenseCategories = [];
+  List<Map<String, dynamic>> activeTargets = [];
   
-  // Mode edit atau tambah
   bool get isEditMode => widget.transaction != null;
   
   @override
   void initState() {
     super.initState();
     _loadCategories();
+    _loadActiveTargets();
     if (isEditMode) {
       _initializeEditData();
     }
@@ -48,27 +51,22 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     super.dispose();
   }
 
-  // Inisialisasi data untuk mode edit
   void _initializeEditData() {
     final transaction = widget.transaction!;
     
-    // Set amount
     final amount = transaction['amount'] as double;
     final formatter = NumberFormat('#,###', 'id_ID');
     final formatted = formatter.format(amount.toInt());
     _amountController.text = 'Rp. ${formatted.replaceAll(',', '.')}';
     
-    // Set note
     _noteController.text = transaction['description'] as String? ?? '';
     
-    // Set date
     final dateStr = transaction['date'] as String;
     selectedDate = DateTime.parse(dateStr);
     
-    // Set category
     selectedCategoryId = transaction['category_id'] as int;
+    selectedBudgetId = transaction['budget_id'] as int?;
     
-    // Set income/expense type
     final categoryType = transaction['category_type'] as String?;
     isIncome = categoryType == 'income';
   }
@@ -80,14 +78,17 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
       final income = await db.getCategoriesByType('income');
       final expense = await db.getCategoriesByType('expense');
       
+      if (!mounted) return;
+      
       setState(() {
         incomeCategories = income;
         expenseCategories = expense;
         
-        // Set kategori default untuk mode tambah
         if (!isEditMode) {
-          if (incomeCategories.isNotEmpty) {
+          if (isIncome && incomeCategories.isNotEmpty) {
             selectedCategoryId = incomeCategories.first['category_id'] as int;
+          } else if (!isIncome && expenseCategories.isNotEmpty) {
+            selectedCategoryId = expenseCategories.first['category_id'] as int;
           }
         }
       });
@@ -96,7 +97,26 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     }
   }
 
-  // Simpan atau update transaksi
+  Future<void> _loadActiveTargets() async {
+    try {
+      final userProvider = Provider.of<UserProvider>(context, listen: false);
+      final userId = userProvider.userId;
+      
+      if (userId == null) return;
+      
+      final db = DatabaseHelper.instance;
+      final targets = await db.getActiveTargets(userId);
+      
+      if (!mounted) return;
+      
+      setState(() {
+        activeTargets = targets;
+      });
+    } catch (e) {
+      print('Error loading targets: $e');
+    }
+  }
+
   Future<void> _saveTransaction() async {
     if (_amountController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -136,7 +156,6 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
       int result;
 
       if (isEditMode) {
-        // Mode edit - update transaksi
         final transactionId = widget.transaction!['transaction_id'] as int;
         result = await db.updateTransaction(
           transactionId: transactionId,
@@ -144,9 +163,9 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
           amount: amount,
           description: description,
           date: dateStr,
+          budgetId: selectedBudgetId,
         );
       } else {
-        // Mode tambah - create transaksi baru
         final userProvider = Provider.of<UserProvider>(context, listen: false);
         final userId = userProvider.userId;
 
@@ -160,6 +179,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
           amount: amount,
           description: description,
           date: dateStr,
+          budgetId: selectedBudgetId,
         );
       }
 
@@ -176,7 +196,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
             backgroundColor: Colors.green,
           ),
         );
-        Navigator.pop(context, true); // Return true untuk refresh
+        Navigator.pop(context, true);
       } else {
         throw Exception('Gagal menyimpan transaksi');
       }
@@ -193,9 +213,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     }
   }
 
-  // Hapus transaksi
   Future<void> _deleteTransaction() async {
-    // Konfirmasi hapus
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -239,7 +257,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
             backgroundColor: Colors.green,
           ),
         );
-        Navigator.pop(context, true); // Return true untuk refresh
+        Navigator.pop(context, true);
       } else {
         throw Exception('Gagal menghapus transaksi');
       }
@@ -313,7 +331,6 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
                     ),
                   ),
                   const Spacer(),
-                  // Tombol hapus (hanya muncul di mode edit)
                   if (isEditMode)
                     GestureDetector(
                       onTap: isLoading ? null : _deleteTransaction,
@@ -469,45 +486,138 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
                       const SizedBox(height: 22),
 
                       // ==== DROPDOWN KATEGORI ====
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(14),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.08),
-                              blurRadius: 6,
-                              offset: const Offset(0, 3),
-                            )
-                          ],
-                        ),
-                        child: currentCategories.isEmpty
-                            ? const Padding(
-                                padding: EdgeInsets.all(14.0),
-                                child: Text('Loading kategori...'),
-                              )
-                            : DropdownButtonFormField<int>(
-                                value: selectedCategoryId,
-                                decoration: const InputDecoration(
-                                  border: InputBorder.none,
-                                  prefixIcon: Icon(Icons.category_outlined),
-                                ),
-                                items: currentCategories
-                                    .map(
-                                      (category) => DropdownMenuItem<int>(
-                                        value: category['category_id'] as int,
-                                        child: Text(category['name'] as String),
-                                      ),
-                                    )
-                                    .toList(),
-                                onChanged: (value) {
-                                  setState(() => selectedCategoryId = value);
-                                },
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(14),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.08),
+                                    blurRadius: 6,
+                                    offset: const Offset(0, 3),
+                                  )
+                                ],
                               ),
+                              child: currentCategories.isEmpty
+                                  ? const Padding(
+                                      padding: EdgeInsets.all(14.0),
+                                      child: Text('Belum ada kategori...'),
+                                    )
+                                  : DropdownButtonFormField<int>(
+                                      value: selectedCategoryId,
+                                      decoration: const InputDecoration(
+                                        border: InputBorder.none,
+                                        prefixIcon: Icon(Icons.category_outlined),
+                                      ),
+                                      items: currentCategories
+                                          .map(
+                                            (category) => DropdownMenuItem<int>(
+                                              value: category['category_id'] as int,
+                                              child: Text(category['name'] as String),
+                                            ),
+                                          )
+                                          .toList(),
+                                      onChanged: (value) {
+                                        setState(() => selectedCategoryId = value);
+                                      },
+                                    ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          // ADDED: Quick access to manage categories
+                          GestureDetector(
+                            onTap: () async {
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const ManageCategoriesPage(),
+                                ),
+                              );
+                              // Reload categories after returning
+                              _loadCategories();
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFED8A35),
+                                borderRadius: BorderRadius.circular(14),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.08),
+                                    blurRadius: 6,
+                                    offset: const Offset(0, 3),
+                                  )
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.settings,
+                                color: Colors.white,
+                                size: 24,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
 
                       const SizedBox(height: 22),
+
+                      // ==== DROPDOWN TARGET (ADDED) ====
+                      if (!isIncome && activeTargets.isNotEmpty)
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              "Target (Opsional)",
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(14),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.08),
+                                    blurRadius: 6,
+                                    offset: const Offset(0, 3),
+                                  )
+                                ],
+                              ),
+                              child: DropdownButtonFormField<int?>(
+                                value: selectedBudgetId,
+                                decoration: const InputDecoration(
+                                  border: InputBorder.none,
+                                  prefixIcon: Icon(Icons.flag_outlined),
+                                ),
+                                hint: const Text('Tidak ada target'),
+                                items: [
+                                  const DropdownMenuItem<int?>(
+                                    value: null,
+                                    child: Text('Tidak ada target'),
+                                  ),
+                                  ...activeTargets.map(
+                                    (target) => DropdownMenuItem<int?>(
+                                      value: target['budget_id'] as int,
+                                      child: Text(target['name'] as String),
+                                    ),
+                                  ),
+                                ],
+                                onChanged: (value) {
+                                  setState(() => selectedBudgetId = value);
+                                },
+                              ),
+                            ),
+                            const SizedBox(height: 22),
+                          ],
+                        ),
 
                       // ===== INPUT TANGGAL =====
                       GestureDetector(

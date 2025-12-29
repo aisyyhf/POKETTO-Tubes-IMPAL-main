@@ -8,6 +8,12 @@ import 'package:poketto/monthly_overview_page.dart';
 import 'package:poketto/folder_detail_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:poketto/all_categories_page.dart';
+import 'package:poketto/target_page.dart';
+import 'package:poketto/manage_categories_page.dart';
+
+Map<String, dynamic>? activeTarget;
+Map<String, dynamic>? targetProgress;
+
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -22,7 +28,6 @@ class _HomeScreenState extends State<HomeScreen> {
   String userName = 'User';
   double saldo = 0.0;
   double pengeluaran = 0.0;
-  int rewardPoints = 0;
   List<Map<String, dynamic>> transactions = [];
   bool isLoading = true;
   List<Map<String, dynamic>> _folders = [];
@@ -40,6 +45,14 @@ class _HomeScreenState extends State<HomeScreen> {
     hidePopupMenu();
     setState(() {
       _isSelectionMode = true;
+      _selectedTransactions.clear();
+    });
+  }
+
+  // FIXED: Added missing _exitSelectionMode method
+  void _exitSelectionMode() {
+    setState(() {
+      _isSelectionMode = false;
       _selectedTransactions.clear();
     });
   }
@@ -270,43 +283,50 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // FIXED: Proper transaction deletion with folder cleanup
   Future<void> _deleteTransaction(int transactionId) async {
     try {
       final db = DatabaseHelper.instance;
+      
+      // FIXED: Hapus dari folder_transaction terlebih dahulu
+      await db.database.then((database) async {
+        await database.delete(
+          'folder_transaction',
+          where: 'transaction_id = ?',
+          whereArgs: [transactionId],
+        );
+      });
+      
+      // Hapus transaksi
       final result = await db.deleteTransaction(transactionId);
       
+      // FIXED: Bersihkan folder yang kosong
+      await db.deleteEmptyFolders();
+      
+      if (!mounted) return;
+      
       if (result > 0) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✓ Transaksi berhasil dihapus'),
-              backgroundColor: Colors.green,
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-          _loadData();
-        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✓ Transaksi berhasil dihapus'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        _loadData();
       } else {
         throw Exception('Gagal menghapus transaksi');
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${e.toString()}'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: ${e.toString()}'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
-  }
-
-  void _exitSelectionMode() {
-    setState(() {
-      _isSelectionMode = false;
-      _selectedTransactions.clear();
-    });
   }
 
   Future<void> _showCreateFolderDialog() async {
@@ -447,19 +467,37 @@ class _HomeScreenState extends State<HomeScreen> {
       final currentMonth = DateFormat('yyyy-MM').format(now);
       final stats = await db.getMonthlyStats(userId, currentMonth);
       final txList = await db.getTransactionsByMonth(userId, currentMonth);
-      final points = await db.getRewardPoints(userId);
       final folderList = await db.getFoldersByUser(userId);
+      
+      // FIXED: Added error handling for target loading
+      Map<String, dynamic>? target;
+      Map<String, dynamic>? progress;
+      
+      try {
+        target = await db.getActiveTarget(userId);
+        if (target != null) {
+          progress = await db.getTargetProgress(userId, target['budget_id'] as int);
+        }
+      } catch (e) {
+        print('Error loading target: $e');
+        target = null;
+        progress = null;
+      }
+
+      if (!mounted) return;
 
       setState(() {
         saldo = stats['balance'] ?? 0.0;
         pengeluaran = stats['expense'] ?? 0.0;
-        rewardPoints = points ?? 0;
         transactions = txList;
         _folders = folderList;
+        activeTarget = target;
+        targetProgress = progress;
         isLoading = false;
       });
     } catch (e) {
       print('Error loading data: $e');
+      if (!mounted) return;
       setState(() => isLoading = false);
     }
   }
@@ -501,11 +539,11 @@ class _HomeScreenState extends State<HomeScreen> {
     _overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
         bottom: 110,
-        left: MediaQuery.of(context).size.width / 2 - 100,
+        left: MediaQuery.of(context).size.width / 2 - 110,
         child: Material(
           color: Colors.transparent,
           child: Container(
-            width: 200,
+            width: 220,
             padding: const EdgeInsets.symmetric(vertical: 10),
             decoration: BoxDecoration(
               color: Colors.white,
@@ -551,6 +589,27 @@ class _HomeScreenState extends State<HomeScreen> {
                         Icon(Icons.create_new_folder_outlined, color: Colors.black),
                         SizedBox(width: 10),
                         Text("Tambah Kategori", style: TextStyle(fontSize: 14)),
+                      ],
+                    ),
+                  ),
+                ),
+                Container(height: 1, color: Colors.black12),
+                InkWell(
+                  onTap: () async {
+                    hidePopupMenu();
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const ManageCategoriesPage()),
+                    );
+                    _loadData();
+                  },
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                    child: Row(
+                      children: [
+                        Icon(Icons.category_outlined, color: Colors.black),
+                        SizedBox(width: 10),
+                        Text("Kelola Kategori", style: TextStyle(fontSize: 14)),
                       ],
                     ),
                   ),
@@ -715,44 +774,139 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 24),
                 Column(
                   children: [
-                    Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 24),
-                      padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 22),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFED8A35),
-                        borderRadius: BorderRadius.circular(28),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Container(
-                            width: 75,
-                            height: 75,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF4F4F2),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.black.withOpacity(0.15), width: 3),
-                            ),
-                            child: Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
+                    GestureDetector(
+                      onTap: () async {
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const TargetPage()),
+                        );
+                        _loadData();
+                      },
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 24),
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFED8A35),
+                          borderRadius: BorderRadius.circular(28),
+                        ),
+                        child: activeTarget == null
+                            ? const Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
-                                  const Icon(Icons.stars_rounded, color: Color(0xFFED8A35), size: 24),
-                                  const SizedBox(height: 2),
-                                  Text("$rewardPoints", style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF4A4A4A))),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Target Keuangan',
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.black87,
+                                        ),
+                                      ),
+                                      SizedBox(height: 4),
+                                      Text(
+                                        'Belum ada target aktif',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.black54,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  Icon(Icons.add_circle_outline, size: 32, color: Colors.white),
+                                ],
+                              )
+                            : Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              activeTarget!['name'] ?? 'Target',
+                                              style: const TextStyle(
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.w700,
+                                                color: Colors.black,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              'Kategori: ${activeTarget!['category_name'] ?? '-'}',
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w500,
+                                                color: Colors.black54,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              'Target: ${formatCurrency((activeTarget!['target_amount'] as num).toDouble())}',
+                                              style: const TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w500,
+                                                color: Colors.black54,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          borderRadius: BorderRadius.circular(20),
+                                        ),
+                                        child: Text(
+                                          '${(targetProgress?['percentage'] ?? 0).toStringAsFixed(0)}%',
+                                          style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFFED8A35),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 16),
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: LinearProgressIndicator(
+                                      value: (targetProgress?['percentage'] ?? 0) / 100,
+                                      minHeight: 8,
+                                      backgroundColor: Colors.white.withOpacity(0.3),
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'Terpakai: ${formatCurrency((targetProgress?['spent'] ?? 0).toDouble())}',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.black87,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                      Text(
+                                        'Sisa: ${formatCurrency((targetProgress?['remaining'] ?? 0).toDouble())}',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ],
                               ),
-                            ),
-                          ),
-                          const Column(
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              Text("Reward", style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Colors.black54)),
-                              SizedBox(height: 2),
-                              Text("Points", style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700, color: Colors.black)),
-                            ],
-                          ),
-                        ],
                       ),
                     ),
                     const SizedBox(height: 16),
