@@ -16,6 +16,7 @@ class _TargetPageState extends State<TargetPage> {
   List<Map<String, dynamic>> targets = [];
   List<Map<String, dynamic>> categories = [];
   bool isLoading = true;
+  int? activeTargetId;
 
   @override
   void initState() {
@@ -36,14 +37,52 @@ class _TargetPageState extends State<TargetPage> {
       final targetList = await db.getAllTargets(userId);
       final categoryList = await db.getCategoriesByType('expense');
       
+      // Get active target ID
+      final activeTarget = await db.getActiveTarget(userId);
+      
       setState(() {
         targets = targetList;
         categories = categoryList;
+        activeTargetId = activeTarget?['budget_id'] as int?;
         isLoading = false;
       });
     } catch (e) {
       print('Error loading targets: $e');
       setState(() => isLoading = false);
+    }
+  }
+
+  // BARU: Method untuk set target aktif
+  Future<void> _setActiveTarget(int budgetId) async {
+    try {
+      final userProvider = Provider.of<UserProvider>(context, listen: false);
+      final db = DatabaseHelper.instance;
+      
+      await db.setActiveTarget(userProvider.userId!, budgetId);
+      
+      if (!mounted) return;
+      
+      setState(() {
+        activeTargetId = budgetId;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✓ Target aktif berhasil diubah'),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: ${e.toString()}'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
@@ -68,7 +107,6 @@ class _TargetPageState extends State<TargetPage> {
                   const Text('Tambah Target Baru', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
                   const SizedBox(height: 20),
                   
-                  // FIXED: Nama Target - Now properly shown
                   TextField(
                     controller: nameController,
                     decoration: InputDecoration(
@@ -79,7 +117,6 @@ class _TargetPageState extends State<TargetPage> {
                   ),
                   const SizedBox(height: 16),
                   
-                  // Kategori
                   DropdownButtonFormField<int>(
                     value: selectedCategoryId,
                     decoration: InputDecoration(
@@ -96,7 +133,6 @@ class _TargetPageState extends State<TargetPage> {
                   ),
                   const SizedBox(height: 16),
                   
-                  // Total Target
                   TextField(
                     controller: amountController,
                     keyboardType: TextInputType.number,
@@ -119,7 +155,6 @@ class _TargetPageState extends State<TargetPage> {
                   ),
                   const SizedBox(height: 16),
                   
-                  // Tanggal Target
                   GestureDetector(
                     onTap: () async {
                       final picked = await showDatePicker(
@@ -149,7 +184,6 @@ class _TargetPageState extends State<TargetPage> {
                   ),
                   const SizedBox(height: 24),
                   
-                  // Buttons
                   Row(
                     children: [
                       Expanded(
@@ -166,7 +200,6 @@ class _TargetPageState extends State<TargetPage> {
                       Expanded(
                         child: ElevatedButton(
                           onPressed: () async {
-                            // FIXED: Validate name field
                             if (nameController.text.trim().isEmpty) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(content: Text('Nama target tidak boleh kosong!')),
@@ -190,7 +223,7 @@ class _TargetPageState extends State<TargetPage> {
                             
                             await db.createBudget(
                               userId: userProvider.userId!,
-                              name: nameController.text.trim(), // FIXED: Added name parameter
+                              name: nameController.text.trim(),
                               categoryId: selectedCategoryId!,
                               targetAmount: amount,
                               startDate: startDate,
@@ -309,6 +342,8 @@ class _TargetPageState extends State<TargetPage> {
                             itemCount: targets.length,
                             itemBuilder: (context, index) {
                               final target = targets[index];
+                              final isActive = activeTargetId == target['budget_id'];
+                              
                               return FutureBuilder<Map<String, dynamic>>(
                                 future: DatabaseHelper.instance.getTargetProgress(
                                   Provider.of<UserProvider>(context, listen: false).userId!,
@@ -324,78 +359,121 @@ class _TargetPageState extends State<TargetPage> {
                                   final spent = progress['spent'] as double;
                                   final targetAmount = progress['target'] as double;
                                   
-                                  return Card(
-                                    margin: const EdgeInsets.only(bottom: 16),
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(20),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Row(
-                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Expanded(
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                                  children: [
-                                                    // FIXED: Show name instead of category
-                                                    Text(
-                                                      target['name'] ?? 'Target',
-                                                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                                                    ),
-                                                    const SizedBox(height: 4),
-                                                    Text(
-                                                      'Kategori: ${target['category_name'] ?? '-'}',
-                                                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                                                    ),
-                                                  ],
+                                  return GestureDetector(
+                                    onTap: () => _setActiveTarget(target['budget_id'] as int),
+                                    child: Card(
+                                      margin: const EdgeInsets.only(bottom: 16),
+                                      elevation: isActive ? 4 : 2,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(20),
+                                        side: isActive 
+                                          ? const BorderSide(color: Color(0xFFED8A35), width: 2)
+                                          : BorderSide.none,
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(20),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Row(
+                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                              children: [
+                                                Expanded(
+                                                  child: Row(
+                                                    children: [
+                                                      if (isActive)
+                                                        Container(
+                                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                                          decoration: BoxDecoration(
+                                                            color: const Color(0xFFED8A35),
+                                                            borderRadius: BorderRadius.circular(8),
+                                                          ),
+                                                          child: const Text(
+                                                            'AKTIF',
+                                                            style: TextStyle(
+                                                              fontSize: 10,
+                                                              fontWeight: FontWeight.w700,
+                                                              color: Colors.white,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      if (isActive) const SizedBox(width: 8),
+                                                      Expanded(
+                                                        child: Column(
+                                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                                          children: [
+                                                            Text(
+                                                              target['name'] ?? 'Target',
+                                                              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                                                            ),
+                                                            const SizedBox(height: 4),
+                                                            Text(
+                                                              'Kategori: ${target['category_name'] ?? '-'}',
+                                                              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
                                                 ),
-                                              ),
-                                              GestureDetector(
-                                                onTap: () => _showDeleteDialog(
-                                                  target['budget_id'] as int,
-                                                  target['name'] as String,
+                                                GestureDetector(
+                                                  onTap: () => _showDeleteDialog(
+                                                    target['budget_id'] as int,
+                                                    target['name'] as String,
+                                                  ),
+                                                  child: const Icon(Icons.delete_outline, color: Colors.red),
                                                 ),
-                                                child: const Icon(Icons.delete_outline, color: Colors.red),
-                                              ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 16),
-                                          Row(
-                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                formatCurrency(spent),
-                                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                                              ),
-                                              Text(
-                                                formatCurrency(targetAmount),
-                                                style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-                                              ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 12),
-                                          ClipRRect(
-                                            borderRadius: BorderRadius.circular(10),
-                                            child: LinearProgressIndicator(
-                                              value: percentage / 100,
-                                              minHeight: 12,
-                                              backgroundColor: Colors.grey[300],
-                                              color: percentage >= 100 ? Colors.red : const Color(0xFFED8A35),
+                                              ],
                                             ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          Text(
-                                            '${percentage.toStringAsFixed(0)}% tercapai',
-                                            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          Text(
-                                            'Sampai ${DateFormat('dd MMM yyyy').format(DateTime.parse(target['end_date'] as String))}',
-                                            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-                                          ),
-                                        ],
+                                            const SizedBox(height: 16),
+                                            Row(
+                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                              children: [
+                                                Text(
+                                                  formatCurrency(spent),
+                                                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                                                ),
+                                                Text(
+                                                  formatCurrency(targetAmount),
+                                                  style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                                                ),
+                                              ],
+                                            ),
+                                            const SizedBox(height: 12),
+                                            ClipRRect(
+                                              borderRadius: BorderRadius.circular(10),
+                                              child: LinearProgressIndicator(
+                                                value: percentage / 100,
+                                                minHeight: 12,
+                                                backgroundColor: Colors.grey[300],
+                                                color: percentage >= 100 ? Colors.red : const Color(0xFFED8A35),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Text(
+                                              '${percentage.toStringAsFixed(0)}% tercapai',
+                                              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Text(
+                                              'Sampai ${DateFormat('dd MMM yyyy').format(DateTime.parse(target['end_date'] as String))}',
+                                              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                                            ),
+                                            if (!isActive)
+                                              Padding(
+                                                padding: const EdgeInsets.only(top: 12),
+                                                child: Text(
+                                                  'Tap untuk set sebagai target aktif',
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    fontStyle: FontStyle.italic,
+                                                    color: Colors.grey[500],
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
                                       ),
                                     ),
                                   );

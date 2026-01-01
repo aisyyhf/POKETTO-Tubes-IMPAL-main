@@ -21,7 +21,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   bool isLoading = true;
   double balance = 0.0;
   List<Map<String, dynamic>> weeklyData = [];
-  int? selectedPointIndex; // Track selected point
+  int? selectedPointIndex; 
 
   @override
   void initState() {

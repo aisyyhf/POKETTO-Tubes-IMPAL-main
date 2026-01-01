@@ -26,10 +26,9 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 6, // UPDATED: Version 6 untuk force hapus reward_point
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
-      // FIXED: Enable foreign keys
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -37,6 +36,7 @@ class DatabaseHelper {
   }
 
   Future<void> _createDB(Database db, int version) async {
+    // User table
     await db.execute('''
       CREATE TABLE user (
         user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +45,8 @@ class DatabaseHelper {
         password TEXT NOT NULL
       )
     ''');
+    
+    // Category table
     await db.execute('''
       CREATE TABLE category (
         category_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +54,8 @@ class DatabaseHelper {
         type TEXT NOT NULL CHECK(type IN ('income', 'expense'))
       )
     ''');
+    
+    // Budget/Target table
     await db.execute('''
       CREATE TABLE budget (
         budget_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,10 +65,14 @@ class DatabaseHelper {
         target_amount REAL,
         start_date TEXT,
         end_date TEXT,
+        is_active INTEGER DEFAULT 0,
+        created_at TEXT,
         FOREIGN KEY (user_id) REFERENCES user (user_id) ON DELETE CASCADE,
         FOREIGN KEY (category_id) REFERENCES category (category_id)
       )
     ''');
+    
+    // Transactions table
     await db.execute('''
       CREATE TABLE transactions (
         transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,15 +87,8 @@ class DatabaseHelper {
         FOREIGN KEY (budget_id) REFERENCES budget (budget_id) ON DELETE SET NULL
       )
     ''');
-    await db.execute('''
-      CREATE TABLE reward_point (
-        point_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        total_points INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES user (user_id) ON DELETE CASCADE
-      )
-    ''');
 
+    // Folder table (untuk "Kategori Saya")
     await db.execute('''
       CREATE TABLE folder (
         folder_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +97,8 @@ class DatabaseHelper {
         FOREIGN KEY (user_id) REFERENCES user (user_id) ON DELETE CASCADE
       )
     ''');
+    
+    // Folder-Transaction junction table
     await db.execute('''
       CREATE TABLE folder_transaction (
         folder_transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +113,7 @@ class DatabaseHelper {
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    // Version 2: Add folder tables
     if (oldVersion < 2) {
       await db.execute('''
         CREATE TABLE folder (
@@ -130,12 +134,38 @@ class DatabaseHelper {
       ''');
     }
     
+    // Version 3: Add name to budget and budget_id to transactions
     if (oldVersion < 3) {
-      // Add name column to budget table
       await db.execute('ALTER TABLE budget ADD COLUMN name TEXT DEFAULT ""');
-      
-      // Add budget_id column to transactions table
       await db.execute('ALTER TABLE transactions ADD COLUMN budget_id INTEGER REFERENCES budget(budget_id) ON DELETE SET NULL');
+    }
+
+    // Version 4: Add is_active and created_at to budget
+    if (oldVersion < 4) {
+      await db.execute('ALTER TABLE budget ADD COLUMN is_active INTEGER DEFAULT 0');
+      await db.execute('ALTER TABLE budget ADD COLUMN created_at TEXT');
+      await db.execute("UPDATE budget SET created_at = datetime('now')");
+      print('✅ Added is_active and created_at columns to budget table');
+    }
+
+    // Version 5: Drop reward_point table
+    if (oldVersion < 5) {
+      try {
+        await db.execute('DROP TABLE IF EXISTS reward_point');
+        print('✅ Removed reward_point table (unused feature)');
+      } catch (e) {
+        print('⚠️  Error dropping reward_point: $e');
+      }
+    }
+
+    // Version 6: Force drop reward_point if still exists
+    if (oldVersion < 6) {
+      try {
+        await db.execute('DROP TABLE IF EXISTS reward_point');
+        print('✅ [V6] Force removed reward_point table');
+      } catch (e) {
+        print('⚠️  [V6] reward_point already removed or error: $e');
+      }
     }
   }
 
@@ -180,11 +210,6 @@ class DatabaseHelper {
         'password': hashedPassword,
       });
       print('✅ User created with ID: $userId');
-      await db.insert('reward_point', {
-        'user_id': userId,
-        'total_points': 0,
-      });
-      print('✅ Reward points created for user $userId');
       return userId;
     } catch (e) {
       print('❌ Error creating user: $e');
@@ -244,7 +269,6 @@ class DatabaseHelper {
     );
   }
 
-  // ADDED: User custom category operations
   Future<int> createCategory(String name, String type) async {
     final db = await database;
     try {
@@ -276,7 +300,6 @@ class DatabaseHelper {
   Future<int> deleteCategory(int categoryId) async {
     final db = await database;
     try {
-      // Check if category is being used in transactions
       final result = await db.query(
         'transactions',
         where: 'category_id = ?',
@@ -319,7 +342,6 @@ class DatabaseHelper {
         'description': description,
         'date': date,
       });
-      await _addRewardPoints(userId, 1);
       return transactionId;
     } catch (e) {
       print('Error creating transaction: $e');
@@ -381,7 +403,6 @@ class DatabaseHelper {
 
   Future<int> deleteTransaction(int transactionId) async {
     final db = await database;
-    // FIXED: With foreign keys enabled, this will automatically cascade delete from folder_transaction
     return await db.delete(
       'transactions',
       where: 'transaction_id = ?',
@@ -389,7 +410,7 @@ class DatabaseHelper {
     );
   }
 
-  // ===== BUDGET OPERATIONS =====
+  // ===== BUDGET/TARGET OPERATIONS =====
   Future<int> createBudget({
     required int userId,
     required String name,
@@ -407,6 +428,8 @@ class DatabaseHelper {
       'target_amount': targetAmount,
       'start_date': startDate,
       'end_date': endDate,
+      'is_active': 0,
+      'created_at': DateTime.now().toIso8601String(),
     });
   }
 
@@ -427,7 +450,7 @@ class DatabaseHelper {
       FROM budget b
       LEFT JOIN category c ON b.category_id = c.category_id
       WHERE b.user_id = ?
-      ORDER BY b.end_date DESC
+      ORDER BY b.is_active DESC, b.end_date DESC
     ''', [userId]);
   }
 
@@ -447,22 +470,45 @@ class DatabaseHelper {
 
   Future<Map<String, dynamic>?> getActiveTarget(int userId) async {
     final db = await database;
-    final now = DateTime.now();
-    final today = DateFormat('yyyy-MM-dd').format(now);
     
     final result = await db.rawQuery('''
       SELECT b.*, c.name as category_name
       FROM budget b
       LEFT JOIN category c ON b.category_id = c.category_id
-      WHERE b.user_id = ? AND b.end_date >= ?
-      ORDER BY b.end_date ASC
+      WHERE b.user_id = ? AND b.is_active = 1
+      ORDER BY b.created_at DESC
       LIMIT 1
-    ''', [userId, today]);
+    ''', [userId]);
     
     if (result.isNotEmpty) {
       return result.first;
     }
     return null;
+  }
+
+  Future<int> setActiveTarget(int userId, int budgetId) async {
+    final db = await database;
+    
+    return await db.transaction((txn) async {
+      // Non-aktifkan semua target user
+      await txn.update(
+        'budget',
+        {'is_active': 0},
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      
+      // Aktifkan target yang dipilih
+      final result = await txn.update(
+        'budget',
+        {'is_active': 1},
+        where: 'budget_id = ? AND user_id = ?',
+        whereArgs: [budgetId, userId],
+      );
+      
+      print('✅ Target $budgetId set as active for user $userId');
+      return result;
+    });
   }
 
   Future<Map<String, dynamic>> getTargetProgress(int userId, int budgetId) async {
@@ -536,30 +582,6 @@ class DatabaseHelper {
     );
   }
 
-  // ===== REWARD OPERATIONS =====
-  Future<void> _addRewardPoints(int userId, int points) async {
-    final db = await database;
-    await db.rawUpdate('''
-      UPDATE reward_point 
-      SET total_points = total_points + ? 
-      WHERE user_id = ?
-    ''', [points, userId]);
-  }
-
-  Future<int?> getRewardPoints(int userId) async {
-    final db = await database;
-    final result = await db.query(
-      'reward_point',
-      where: 'user_id = ?',
-      whereArgs: [userId],
-    );
-
-    if (result.isNotEmpty) {
-      return result.first['total_points'] as int?;
-    }
-    return 0;
-  }
-
   // ===== STATS OPERATIONS =====
   Future<Map<String, double>> getMonthlyStats(int userId, String month) async {
     final db = await database;
@@ -588,7 +610,7 @@ class DatabaseHelper {
     };
   }
 
-  // ===== FOLDER OPERATIONS =====
+  // ===== FOLDER OPERATIONS (Kategori Saya) =====
   Future<int> createFolder(int userId, String folderName, List<int> transactionIds) async {
     final db = await database;
     return await db.transaction((txn) async {
@@ -684,7 +706,6 @@ class DatabaseHelper {
     print('✅ Berhasil mengeluarkan ${transactionIds.length} transaksi dari folder ID: $folderId.');
   }
 
-  // FIXED: Enhanced deleteEmptyFolders with error handling
   Future<void> deleteEmptyFolders() async {
     try {
       final db = await database;
